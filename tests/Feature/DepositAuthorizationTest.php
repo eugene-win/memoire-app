@@ -6,12 +6,18 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use setasign\Fpdi\Fpdi;
 
 uses(RefreshDatabase::class);
 
 function validAuthorizedStudentPdf(): UploadedFile
 {
-    return UploadedFile::fake()->createWithContent('memoire.pdf', "%PDF-1.4\nstudent deposit\n%%EOF");
+    $pdf = new Fpdi;
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 12);
+    $pdf->Write(10, 'student deposit');
+
+    return UploadedFile::fake()->createWithContent('memoire.pdf', $pdf->Output('S'));
 }
 
 it('allows a responsible to grant a persistent deposit authorization and the student to submit', function () {
@@ -22,6 +28,7 @@ it('allows a responsible to grant a persistent deposit authorization and the stu
         'matricule' => 'ETU-TEST-001',
         'deposit_authorized' => false,
     ]);
+    prepareStudentForDeposit($student, false);
 
     $this->actingAs($responsible)
         ->from(route('dashboard'))
@@ -37,6 +44,11 @@ it('allows a responsible to grant a persistent deposit authorization and the stu
         'responsible_id' => $responsible->id,
         'action' => 'granted',
         'reason' => 'Éligibilité institutionnelle vérifiée pour le dépôt.',
+    ]);
+    $this->assertDatabaseHas('deposit_authorizations', [
+        'student_id' => $student->id,
+        'authorized_by_id' => $responsible->id,
+        'status' => 'active',
     ]);
     $student->refresh();
     $this->actingAs($student)
@@ -66,6 +78,7 @@ it('records a reason when a responsible revokes a deposit authorization', functi
         'matricule' => 'ETU-TEST-002',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($student);
 
     $this->actingAs($responsible)
         ->from(route('dashboard'))
@@ -95,6 +108,28 @@ it('records a reason when a responsible revokes a deposit authorization', functi
         ])
         ->assertForbidden();
     expect(Thesis::count())->toBe(0);
+});
+
+it('renews an expired active authorization instead of treating it as valid', function () {
+    $responsible = User::factory()->create(['role' => 'validator']);
+    $student = User::factory()->create([
+        'role' => 'student',
+        'matricule' => 'ETU-TEST-004',
+        'deposit_authorized' => true,
+    ]);
+    prepareStudentForDeposit($student);
+    $student->depositAuthorization()->update(['expires_at' => now()->subDay()]);
+
+    $this->actingAs($responsible)
+        ->from(route('dashboard'))
+        ->post(route('responsable.deposit-authorizations.store'), [
+            'matricule' => $student->matricule,
+            'reason' => 'Nouvelle vérification institutionnelle conforme.',
+        ])
+        ->assertRedirect(route('dashboard'));
+
+    expect($student->depositAuthorization()->first()->expires_at)->toBeNull()
+        ->and(DepositAuthorizationEvent::where('student_id', $student->id)->where('action', 'granted')->count())->toBe(1);
 });
 
 it('does not let readers grant deposit authorizations', function () {

@@ -4,10 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Models\Thesis;
 use App\Models\ThesisPayment;
+use App\Services\ActivityLogger;
 use App\Services\Payments\KkiapayGateway;
 use App\Services\Payments\KkiapayServiceException;
 use App\Services\Payments\PaymentVerificationException;
 use App\Services\Payments\ThesisPaymentConfirmationService;
+use App\Services\PlatformSettings;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -17,13 +19,18 @@ use Illuminate\Support\Str;
 
 class PaymentController extends Controller
 {
-    private const PRICE_XOF = 1000;
-
-    public function start(Request $request, Thesis $thesis, KkiapayGateway $gateway): View|RedirectResponse
-    {
+    public function start(
+        Request $request,
+        Thesis $thesis,
+        KkiapayGateway $gateway,
+        PlatformSettings $settings,
+        ActivityLogger $activityLogger
+    ): View|RedirectResponse {
         $user = $request->user();
-        abort_unless($user->role === 'external_reader', 403);
+        abort_unless($user->hasRole('external_reader') && $user->account_status === 'active', 403);
         abort_unless($thesis->status === 'published' && $thesis->published_at !== null && $thesis->currentVersion, 404);
+        $price = $settings->integer('external_access_price_xof', 1000);
+        abort_if($price < 1, 503, 'Le tarif d’accès externe n’est pas valide.');
 
         if ($user->accessGrants()->where('thesis_id', $thesis->id)->where('status', 'active')->exists()) {
             return redirect()->route('thesis-versions.viewer', $thesis->currentVersion);
@@ -35,7 +42,7 @@ class PaymentController extends Controller
             ]);
         }
 
-        $payment = DB::transaction(function () use ($user, $thesis): ?ThesisPayment {
+        $payment = DB::transaction(function () use ($user, $thesis, $price, $activityLogger): ?ThesisPayment {
             $lockedThesis = Thesis::query()->lockForUpdate()->findOrFail($thesis->id);
             abort_unless(
                 $lockedThesis->status === 'published'
@@ -59,15 +66,21 @@ class PaymentController extends Controller
                 return $pendingPayment;
             }
 
-            return ThesisPayment::create([
+            $payment = ThesisPayment::create([
                 'user_id' => $user->id,
                 'thesis_id' => $lockedThesis->id,
                 'provider' => 'kkiapay',
                 'reference' => (string) Str::uuid(),
-                'amount' => self::PRICE_XOF,
+                'amount' => $price,
                 'currency' => 'XOF',
                 'status' => 'pending',
             ]);
+            $activityLogger->record($user, 'payment.initiated', $payment, [
+                'thesis_id' => $lockedThesis->id,
+                'amount_xof' => $price,
+            ]);
+
+            return $payment;
         });
 
         if (! $payment) {
@@ -86,6 +99,7 @@ class PaymentController extends Controller
         ThesisPayment $payment,
         ThesisPaymentConfirmationService $confirmation
     ): JsonResponse {
+        abort_unless($request->user()->account_status === 'active', 403);
         abort_unless($payment->user_id === $request->user()->id, 404);
 
         $validated = $request->validate([

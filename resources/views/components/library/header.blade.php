@@ -16,7 +16,9 @@
 
                 <div class="header-actions">
                     @auth
-                        <a class="button button-outline" href="{{ route('dashboard') }}">Mon espace</a>
+                        <a class="button button-outline" href="{{ auth()->user()->hasRole('administrator') ? route('admin.index') : route('dashboard') }}">
+                            {{ auth()->user()->hasRole('administrator') ? 'Administration' : 'Mon espace' }}
+                        </a>
                         <form method="POST" action="{{ route('logout') }}">
                             @csrf
                             <button class="button" type="submit">Se déconnecter</button>

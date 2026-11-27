@@ -28,6 +28,7 @@ class UserFactory extends Factory
             'name' => fake()->name(),
             'email' => fake()->unique()->safeEmail(),
             'role' => 'external_reader',
+            'account_status' => 'active',
             'deposit_authorized' => false,
             'email_verified_at' => now(),
             'password' => static::$password ??= Hash::make('password'),

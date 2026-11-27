@@ -1,5 +1,10 @@
 <?php
 
+use App\Models\DepositAuthorization;
+use App\Models\Filiere;
+use App\Models\Student;
+use App\Models\StudyLevel;
+use App\Models\User;
 use Tests\TestCase;
 
 /*
@@ -46,4 +51,45 @@ expect()->extend('toBeOne', function () {
 function something()
 {
     // ..
+}
+
+function prepareStudentForDeposit(User $user, bool $authorized = true): void
+{
+    foreach ([
+        ['code' => 'FIN-COMP', 'name' => 'Finance et comptabilité'],
+        ['code' => 'GEST-ENT', 'name' => 'Gestion des entreprises'],
+        ['code' => 'MARK-COM', 'name' => 'Marketing et commerce'],
+        ['code' => 'INFO-GEST', 'name' => 'Informatique de gestion'],
+        ['code' => 'ECO-APP', 'name' => 'Économie appliquée'],
+    ] as $referenceFiliere) {
+        Filiere::query()->firstOrCreate(
+            ['code' => $referenceFiliere['code']],
+            ['name' => $referenceFiliere['name'], 'is_active' => true],
+        );
+    }
+
+    $level = StudyLevel::query()->firstOrCreate(
+        ['code' => 'L3'],
+        ['name' => 'Licence 3', 'is_active' => true],
+    );
+    $filiere = Filiere::query()->where('code', 'INFO-GEST')->firstOrFail();
+    Student::query()->updateOrCreate(
+        ['user_id' => $user->id],
+        [
+            'matricule' => $user->matricule,
+            'filiere_id' => $filiere->id,
+            'study_level_id' => $level->id,
+            'enrollment_status' => 'enrolled',
+            'institutionally_verified_at' => now(),
+            'defended_at' => now(),
+        ],
+    );
+    $user->update(['deposit_authorized' => $authorized]);
+    DepositAuthorization::query()->updateOrCreate(
+        ['student_id' => $user->id],
+        [
+            'status' => $authorized ? 'active' : 'inactive',
+            'authorized_at' => $authorized ? now() : null,
+        ],
+    );
 }

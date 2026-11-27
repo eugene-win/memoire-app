@@ -12,6 +12,7 @@ class ThesisDecision extends Model
         'thesis_version_id',
         'actor_id',
         'type',
+        'source',
         'reason',
     ];
 

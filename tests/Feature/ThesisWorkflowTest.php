@@ -1,5 +1,7 @@
 <?php
 
+use App\Models\StudyLevel;
+use App\Models\PlatformSetting;
 use App\Models\Thesis;
 use App\Models\ThesisDecision;
 use App\Models\ThesisVersion;
@@ -8,12 +10,18 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Foundation\Testing\TestCase as LaravelTestCase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use setasign\Fpdi\Fpdi;
 
 uses(RefreshDatabase::class);
 
 function validThesisPdf(string $content = 'document'): UploadedFile
 {
-    return UploadedFile::fake()->createWithContent('memoire.pdf', "%PDF-1.4\n".$content."\n%%EOF");
+    $pdf = new Fpdi;
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 12);
+    $pdf->Write(10, $content);
+
+    return UploadedFile::fake()->createWithContent('memoire.pdf', $pdf->Output('S'));
 }
 
 function thesisSubmission(UploadedFile $file, array $overrides = []): array
@@ -30,7 +38,7 @@ function thesisSubmission(UploadedFile $file, array $overrides = []): array
 
 function submitThesis(LaravelTestCase $test, User $student, UploadedFile $file, array $overrides = [])
 {
-    return $test->actingAs($student)
+    return $test->actingAs($student->fresh())
         ->from(route('dashboard'))
         ->post(route('deposits.store'), thesisSubmission($file, $overrides));
 }
@@ -42,6 +50,7 @@ it('stores an eligible student thesis and its PDF privately', function () {
         'matricule' => 'ENEAM-2026-101',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($student);
 
     submitThesis($this, $student, validThesisPdf())->assertRedirect(route('dashboard'));
 
@@ -70,19 +79,67 @@ it('rejects unauthorized depositors and malformed or duplicate files', function 
         'matricule' => 'ENEAM-2026-102',
         'deposit_authorized' => false,
     ]);
+    prepareStudentForDeposit($student, false);
 
     submitThesis($this, $student, validThesisPdf())->assertForbidden();
     expect(Thesis::count())->toBe(0);
 
-    $student->update(['deposit_authorized' => true]);
+    prepareStudentForDeposit($student);
     submitThesis($this, $student, UploadedFile::fake()->createWithContent('not-a-pdf.pdf', 'not a pdf'))
+        ->assertSessionHasErrors('document');
+    submitThesis($this, $student, UploadedFile::fake()->createWithContent('corrupt.pdf', "%PDF-1.4\nnot a valid PDF"))
         ->assertSessionHasErrors('document');
 
     $sameFile = validThesisPdf('same bytes');
+    $sameBytes = file_get_contents($sameFile->getRealPath());
     submitThesis($this, $student, $sameFile)->assertRedirect(route('dashboard'));
-    submitThesis($this, $student, validThesisPdf('same bytes'))->assertSessionHasErrors('document');
+    submitThesis($this, $student, UploadedFile::fake()->createWithContent('memoire.pdf', $sameBytes))
+        ->assertSessionHasErrors('document');
     expect(Thesis::count())->toBe(1)
         ->and(ThesisVersion::count())->toBe(1);
+});
+
+it('rejects thesis PDFs larger than five mebibytes', function () {
+    Storage::fake('local');
+    $student = User::factory()->create([
+        'role' => 'student',
+        'matricule' => 'ENEAM-2026-111',
+        'deposit_authorized' => true,
+    ]);
+    prepareStudentForDeposit($student);
+    $pdfContent = "%PDF-1.4\n".str_repeat(' ', 5 * 1024 * 1024);
+
+    submitThesis($this, $student, UploadedFile::fake()->createWithContent('oversize.pdf', $pdfContent))
+        ->assertSessionHasErrors('document');
+
+    expect(Thesis::count())->toBe(0);
+});
+
+it('requires an enrolled verified L3 student who has defended and has active authorization', function () {
+    Storage::fake('local');
+    $student = User::factory()->create([
+        'role' => 'student',
+        'matricule' => 'ENEAM-2026-110',
+        'deposit_authorized' => true,
+    ]);
+    prepareStudentForDeposit($student);
+    $levelL2 = StudyLevel::query()->firstOrCreate(
+        ['code' => 'L2'],
+        ['name' => 'Licence 2', 'is_active' => true],
+    );
+
+    $student->student()->update(['study_level_id' => $levelL2->id]);
+    submitThesis($this, $student, validThesisPdf('wrong level'))->assertForbidden();
+
+    $student->student()->update(['study_level_id' => StudyLevel::where('code', 'L3')->value('id'), 'defended_at' => null]);
+    submitThesis($this, $student, validThesisPdf('not defended'))->assertForbidden();
+
+    $student->student()->update(['defended_at' => now()]);
+    $student->depositAuthorization()->update(['status' => 'revoked']);
+    submitThesis($this, $student, validThesisPdf('authorization revoked'))->assertForbidden();
+
+    $student->depositAuthorization()->update(['status' => 'active']);
+    submitThesis($this, $student, validThesisPdf('eligible'))->assertRedirect(route('dashboard'));
 });
 
 it('keeps an eligible analysis pending physical review until a human publishes', function () {
@@ -92,6 +149,7 @@ it('keeps an eligible analysis pending physical review until a human publishes',
         'matricule' => 'ENEAM-2026-103',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($student);
     $validator = User::factory()->create([
         'role' => 'validator',
         'matricule' => 'ENEAM-STAFF-103',
@@ -99,6 +157,12 @@ it('keeps an eligible analysis pending physical review until a human publishes',
 
     submitThesis($this, $student, validThesisPdf())->assertRedirect(route('dashboard'));
     $thesis = Thesis::firstOrFail();
+    PlatformSetting::query()->create([
+        'setting_key' => 'maximum_similarity_percent',
+        'setting_group' => 'analysis',
+        'value' => 10,
+        'is_public' => false,
+    ]);
 
     $this->actingAs($validator)->from(route('dashboard'))
         ->post(route('responsable.theses.analysis', $thesis), [
@@ -128,6 +192,25 @@ it('keeps an eligible analysis pending physical review until a human publishes',
 
     expect($thesis->fresh()->status)->toBe('published')
         ->and($thesis->fresh()->published_at)->not->toBeNull();
+    $currentVersion = $thesis->fresh()->currentVersion;
+    expect($currentVersion->version_status)->toBe('published');
+    $this->assertDatabaseHas('similarity_reports', [
+        'thesis_version_id' => $currentVersion->id,
+        'status' => 'completed',
+    ]);
+    $this->assertDatabaseHas('thesis_physical_receipts', [
+        'thesis_id' => $thesis->id,
+        'thesis_version_id' => $currentVersion->id,
+        'responsible_id' => $validator->id,
+        'is_compatible' => true,
+    ]);
+    $this->assertDatabaseHas('thesis_publications', [
+        'thesis_id' => $thesis->id,
+        'thesis_version_id' => $currentVersion->id,
+        'actor_id' => $validator->id,
+        'action' => 'published',
+        'visibility' => 'public',
+    ]);
     $this->assertDatabaseHas('thesis_decisions', [
         'thesis_id' => $thesis->id,
         'actor_id' => $validator->id,
@@ -143,6 +226,7 @@ it('notifies the depositor and responsible accounts and scopes read actions to t
         'matricule' => 'ENEAM-2026-109',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($student);
     $validator = User::factory()->create([
         'role' => 'validator',
         'matricule' => 'ENEAM-STAFF-109',
@@ -194,6 +278,7 @@ it('automatically rejects a similarity score over twenty percent and logs analys
         'matricule' => 'ENEAM-2026-104',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($student);
     $validator = User::factory()->create([
         'role' => 'validator',
         'matricule' => 'ENEAM-STAFF-104',
@@ -249,11 +334,13 @@ it('creates a new immutable version after rejection and restricts access to the 
         'matricule' => 'ENEAM-2026-105',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($student);
     $otherStudent = User::factory()->create([
         'role' => 'student',
         'matricule' => 'ENEAM-2026-106',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($otherStudent);
     $validator = User::factory()->create([
         'role' => 'library_manager',
         'matricule' => 'ENEAM-STAFF-105',
@@ -287,6 +374,12 @@ it('creates a new immutable version after rejection and restricts access to the 
         ->assertRedirect(route('dashboard'))
         ->assertSessionHasNoErrors();
     expect($thesis->fresh()->status)->toBe('rejected');
+    $this->assertDatabaseHas('thesis_physical_receipts', [
+        'thesis_id' => $thesis->id,
+        'thesis_version_id' => $firstVersion->id,
+        'is_compatible' => false,
+        'notes' => 'Le document papier ne correspond pas au PDF.',
+    ]);
 
     submitThesis($this, $student, validThesisPdf('corrected version'), [
         'thesis_id' => $thesis->id,
@@ -313,9 +406,15 @@ it('provides a protected viewer for published theses to students but not unpaid 
         'matricule' => 'ENEAM-2026-107',
         'deposit_authorized' => true,
     ]);
+    prepareStudentForDeposit($owner);
     $studentReader = User::factory()->create([
         'role' => 'student',
         'matricule' => 'ENEAM-2026-108',
+    ]);
+    prepareStudentForDeposit($studentReader);
+    $unverifiedStudent = User::factory()->create([
+        'role' => 'student',
+        'matricule' => 'ENEAM-2026-111',
     ]);
     $externalReader = User::factory()->create(['role' => 'external_reader']);
 
@@ -339,6 +438,9 @@ it('provides a protected viewer for published theses to students but not unpaid 
         ->assertOk()
         ->assertHeader('Content-Type', 'application/pdf')
         ->assertHeader('X-Frame-Options', 'SAMEORIGIN');
+    $this->actingAs($unverifiedStudent)
+        ->get(route('thesis-versions.document', $version))
+        ->assertForbidden();
     $this->assertDatabaseHas('thesis_consultations', [
         'user_id' => $studentReader->id,
         'thesis_id' => $thesis->id,
@@ -432,6 +534,11 @@ it('shows published theses in the public catalogue and hides every other status'
         ->assertOk()
         ->assertSee('Mémoire réellement publié')
         ->assertSee('data-real="true"', false)
+        ->assertDontSee('Mémoire encore privé')
+        ->assertDontSee('Notices de démonstration');
+    $this->get(route('home', ['q' => 'Mémoire réellement']))
+        ->assertOk()
+        ->assertSee('Mémoire réellement publié')
         ->assertDontSee('Mémoire encore privé')
         ->assertDontSee('Notices de démonstration');
 });

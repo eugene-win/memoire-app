@@ -5,19 +5,27 @@ namespace App\Services\Payments;
 use App\Models\ThesisAccessGrant;
 use App\Models\ThesisPayment;
 use App\Notifications\ThesisWorkflowNotification;
+use App\Services\ActivityLogger;
 use Illuminate\Support\Facades\DB;
 
 class ThesisPaymentConfirmationService
 {
-    public function __construct(private readonly KkiapayGateway $gateway) {}
+    public function __construct(
+        private readonly PaymentGateway $gateway,
+        private readonly ActivityLogger $activityLogger
+    ) {}
 
     public function confirm(ThesisPayment $payment, string $transactionId): string
     {
+        if ($payment->provider !== $this->gateway->providerName()) {
+            throw new PaymentVerificationException('Le prestataire de la transaction ne correspond pas au prestataire actif.');
+        }
+
         $providerResult = $this->gateway->verifyTransaction($transactionId);
         $status = strtoupper((string) ($providerResult['status'] ?? ''));
 
         if (($providerResult['transactionId'] ?? null) !== $transactionId) {
-            throw new PaymentVerificationException('La référence de transaction retournée par KKiaPay ne correspond pas.');
+            throw new PaymentVerificationException('La référence de transaction retournée par le prestataire ne correspond pas.');
         }
 
         if (($providerResult['partnerId'] ?? null) !== $payment->reference) {
@@ -25,11 +33,15 @@ class ThesisPaymentConfirmationService
         }
 
         if (! is_numeric($providerResult['amount'] ?? null) || (float) $providerResult['amount'] !== (float) $payment->amount) {
-            throw new PaymentVerificationException('Le montant confirmé par KKiaPay ne correspond pas au montant attendu.');
+            throw new PaymentVerificationException('Le montant confirmé par le prestataire ne correspond pas au montant attendu.');
+        }
+
+        if (strtoupper((string) ($providerResult['currency'] ?? '')) !== strtoupper($payment->currency)) {
+            throw new PaymentVerificationException('La devise confirmée par le prestataire ne correspond pas à la devise attendue.');
         }
 
         if (! in_array($status, ['SUCCESS', 'FAILED', 'PENDING'], true)) {
-            throw new PaymentVerificationException('Le statut retourné par KKiaPay est inconnu.');
+            throw new PaymentVerificationException('Le statut retourné par le prestataire est inconnu.');
         }
 
         $safeProviderPayload = [
@@ -37,6 +49,7 @@ class ThesisPaymentConfirmationService
             'transactionId' => $transactionId,
             'partnerId' => $payment->reference,
             'source' => $providerResult['source'] ?? null,
+            'currency' => strtoupper($payment->currency),
             'performed_at' => $providerResult['performed_at'] ?? $providerResult['performedAt'] ?? null,
         ];
 
@@ -73,6 +86,9 @@ class ThesisPaymentConfirmationService
                     $lockedPayment->thesis_id,
                     $lockedPayment->thesis->currentVersion->id,
                 ));
+                $this->activityLogger->record($lockedPayment->user, 'payment.failed', $lockedPayment, [
+                    'transaction_id' => $transactionId,
+                ]);
             }
 
             return $status === 'FAILED' ? 'failed' : 'pending';
@@ -136,10 +152,14 @@ class ThesisPaymentConfirmationService
             $user->notify(new ThesisWorkflowNotification(
                 'payment_confirmed',
                 'Paiement confirmé',
-                'Le paiement de 1 000 F CFA pour « '.$thesis->title.' » a été confirmé.',
+                'Le paiement de '.$lockedPayment->amount.' F CFA pour « '.$thesis->title.' » a été confirmé.',
                 $thesis->id,
                 $version->id,
             ));
+            $this->activityLogger->record($user, 'payment.confirmed', $lockedPayment, [
+                'transaction_id' => $transactionId,
+                'amount_xof' => $lockedPayment->amount,
+            ]);
             $user->notify(new ThesisWorkflowNotification(
                 'access_granted',
                 'Accès accordé',

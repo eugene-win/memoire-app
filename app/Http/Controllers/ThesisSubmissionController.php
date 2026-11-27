@@ -2,11 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\DefenseYear;
+use App\Models\Filiere;
 use App\Models\Thesis;
 use App\Models\ThesisDecision;
 use App\Models\ThesisVersion;
 use App\Models\User;
 use App\Notifications\ThesisWorkflowNotification;
+use App\Services\ActivityLogger;
+use App\Services\DepositEligibility;
+use App\Services\Pdf\PdfDocumentValidator;
+use App\Services\PlatformSettings;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -20,26 +26,24 @@ use Throwable;
 
 class ThesisSubmissionController extends Controller
 {
-    private const DEPARTMENTS = [
-        'Finance et comptabilité',
-        'Gestion des entreprises',
-        'Marketing et commerce',
-        'Informatique de gestion',
-        'Économie appliquée',
-    ];
-
-    public function store(Request $request): RedirectResponse
-    {
+    public function store(
+        Request $request,
+        DepositEligibility $eligibility,
+        PlatformSettings $settings,
+        ActivityLogger $activityLogger,
+        PdfDocumentValidator $pdfValidator
+    ): RedirectResponse {
         $student = $request->user();
-        abort_unless($student->role === 'student' && $student->deposit_authorized, 403);
+        $eligibility->ensureEligible($student);
+        $maximumFileSizeKb = max(1, (int) ceil($settings->integer('maximum_pdf_size_bytes', 5242880) / 1024));
 
         $validated = $request->validate([
             'thesis_id' => ['nullable', 'integer'],
             'title' => ['required', 'string', 'max:255'],
-            'department' => ['required', Rule::in(self::DEPARTMENTS)],
+            'department' => ['required', Rule::exists('filieres', 'name')->where('is_active', true)],
             'defended_year' => ['required', 'integer', 'between:2000,'.now()->year],
             'supervisor' => ['nullable', 'string', 'max:255'],
-            'document' => ['required', 'file', 'mimes:pdf', 'mimetypes:application/pdf', 'max:51200'],
+            'document' => ['required', 'file', 'mimes:pdf', 'mimetypes:application/pdf', 'max:'.$maximumFileSizeKb],
             'rights' => ['accepted'],
         ]);
 
@@ -56,6 +60,7 @@ class ThesisSubmissionController extends Controller
                 'document' => 'Le fichier sélectionné ne contient pas une signature PDF valide.',
             ]);
         }
+        $pdfValidator->validate($file->getRealPath(), 'document');
 
         $path = $file->store('theses/'.$student->id, 'local');
         if (! is_string($path)) {
@@ -75,7 +80,7 @@ class ThesisSubmissionController extends Controller
         );
 
         try {
-            DB::transaction(function () use ($validated, $student, $file, $path, $checksum, $originalFilename): void {
+            DB::transaction(function () use ($validated, $student, $file, $path, $checksum, $originalFilename, $activityLogger): void {
                 if (ThesisVersion::query()->where('checksum', $checksum)->exists()) {
                     throw ValidationException::withMessages([
                         'document' => 'Ce fichier a déjà été soumis à la bibliothèque.',
@@ -95,17 +100,21 @@ class ThesisSubmissionController extends Controller
                         ]);
                     }
 
+                    [$filiere, $defenseYear] = $this->resolveAcademicReferences($validated);
                     $versionNumber = $thesis->versions()->max('version_number') + 1;
                     $thesis->update([
                         'title' => $validated['title'],
                         'department' => $validated['department'],
+                        'filiere_id' => $filiere->id,
                         'defended_year' => $validated['defended_year'],
+                        'defense_year_id' => $defenseYear->id,
                         'supervisor' => $validated['supervisor'] ?? null,
                         'status' => 'analysis_pending',
                         'published_at' => null,
                     ]);
                     $decisionType = 'resubmitted';
                 } else {
+                    [$filiere, $defenseYear] = $this->resolveAcademicReferences($validated);
                     $thesis = Thesis::create([
                         'reference' => 'EN-'.Str::upper(Str::random(12)),
                         'student_id' => $student->id,
@@ -113,7 +122,9 @@ class ThesisSubmissionController extends Controller
                         'author_name' => $student->name,
                         'matricule' => $student->matricule,
                         'department' => $validated['department'],
+                        'filiere_id' => $filiere->id,
                         'defended_year' => $validated['defended_year'],
+                        'defense_year_id' => $defenseYear->id,
                         'supervisor' => $validated['supervisor'] ?? null,
                         'status' => 'analysis_pending',
                     ]);
@@ -136,6 +147,10 @@ class ThesisSubmissionController extends Controller
                         'supervisor' => $validated['supervisor'] ?? null,
                     ],
                     'rights_confirmed_at' => now(),
+                    'submitted_by_id' => $student->id,
+                    'submitted_at' => now(),
+                    'mime_type' => 'application/pdf',
+                    'version_status' => 'submitted',
                     'analysis_status' => 'pending',
                 ]);
 
@@ -145,6 +160,10 @@ class ThesisSubmissionController extends Controller
                     'actor_id' => $student->id,
                     'type' => $decisionType,
                     'reason' => $decisionType === 'resubmitted' ? 'Nouvelle version soumise après rejet.' : null,
+                ]);
+                $activityLogger->record($student, $decisionType, $version, [
+                    'thesis_id' => $thesis->id,
+                    'version_number' => $versionNumber,
                 ]);
 
                 $isResubmission = $decisionType === 'resubmitted';
@@ -216,15 +235,20 @@ class ThesisSubmissionController extends Controller
     {
         $thesis = $version->thesis;
         $user = $request->user();
+        abort_unless($user->account_status === 'active', 403);
         $isOwner = $thesis->student_id === $user->id;
-        $isResponsible = in_array($user->role, ['validator', 'library_manager'], true)
+        $isResponsible = $user->hasRole(['validator', 'library_manager'])
             && $thesis->student_id !== $user->id;
-        $isStudentReadingPublishedThesis = $user->role === 'student'
-            && $thesis->status === 'published'
-            && $thesis->published_at !== null;
-        $isPaidExternalReader = $user->role === 'external_reader'
+        $isVerifiedStudent = $user->hasRole('student')
+            && $user->student()->whereNotNull('institutionally_verified_at')->exists();
+        $isStudentReadingPublishedThesis = $isVerifiedStudent
             && $thesis->status === 'published'
             && $thesis->published_at !== null
+            && $thesis->visibility === 'public';
+        $isPaidExternalReader = $user->hasRole('external_reader')
+            && $thesis->status === 'published'
+            && $thesis->published_at !== null
+            && $thesis->visibility === 'public'
             && $user->accessGrants()
                 ->where('thesis_id', $thesis->id)
                 ->where('status', 'active')
@@ -246,5 +270,23 @@ class ThesisSubmissionController extends Controller
             'validator', 'library_manager' => 'responsible',
             default => 'other',
         };
+    }
+
+    /**
+     * @return array{Filiere, DefenseYear}
+     */
+    private function resolveAcademicReferences(array $validated): array
+    {
+        $filiere = Filiere::query()
+            ->where('name', $validated['department'])
+            ->where('is_active', true)
+            ->firstOrFail();
+        $defenseYear = DefenseYear::query()->firstOrCreate(
+            ['label' => (string) $validated['defended_year']],
+            ['is_active' => true],
+        );
+        abort_unless($defenseYear->is_active, 422, 'Cette année de soutenance n’est pas active.');
+
+        return [$filiere, $defenseYear];
     }
 }

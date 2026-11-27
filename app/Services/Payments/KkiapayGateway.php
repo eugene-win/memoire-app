@@ -5,8 +5,13 @@ namespace App\Services\Payments;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
-class KkiapayGateway
+class KkiapayGateway implements PaymentGateway
 {
+    public function providerName(): string
+    {
+        return 'kkiapay';
+    }
+
     public function isConfigured(): bool
     {
         return collect([

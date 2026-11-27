@@ -11,6 +11,21 @@
 
         @include('components.library.dashboard.notifications')
 
+        <article class="dashboard-card student-identity-card">
+            <div class="dashboard-card-heading">
+                <div>
+                    <h2>Mes informations ENEAM</h2>
+                    <p>Identité académique associée à votre matricule.</p>
+                </div>
+            </div>
+            <dl class="account-details">
+                <div><dt>Matricule</dt><dd>{{ auth()->user()->matricule ?? 'Non renseigné' }}</dd></div>
+                <div><dt>Nom</dt><dd>{{ $studentRegistry?->last_name ?? auth()->user()->last_name ?? 'Non renseigné' }}</dd></div>
+                <div><dt>Prénom</dt><dd>{{ $studentRegistry?->first_name ?? auth()->user()->first_name ?? 'Non renseigné' }}</dd></div>
+                <div><dt>Classe</dt><dd>{{ $studentRegistry?->class_code ?? 'Non renseignée' }}</dd></div>
+            </dl>
+        </article>
+
         <div class="dashboard-grid">
             <article class="dashboard-card dashboard-reading">
                 <div class="dashboard-card-heading">
@@ -117,7 +132,7 @@
                                         <p class="decision-note"><strong>{{ str_replace('_', ' ', ucfirst($decision->type)) }} · V{{ $decision->version->version_number ?? '?' }} · {{ $decision->created_at->format('d/m/Y H:i') }}{{ $decision->actor ? ' · '.$decision->actor->name : '' }} :</strong> {{ $decision->reason }}</p>
                                     @endif
                                 @endforeach
-                                @if ($thesis->status === 'rejected' && auth()->user()->deposit_authorized)
+                                @if ($isL3Student && $thesis->status === 'rejected' && auth()->user()->deposit_authorized)
                                     <a class="text-button" href="#deposit-form">Déposer une version corrigée</a>
                                 @endif
                                 @if ($currentVersion?->analysis_status === 'error')
@@ -139,7 +154,8 @@
                 </div>
             </article>
 
-            <article class="dashboard-card dashboard-deposit" id="deposer">
+            @if ($isL3Student)
+                <article class="dashboard-card dashboard-deposit" id="deposer">
                 <div class="dashboard-card-heading">
                     <span class="benefit-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -154,7 +170,7 @@
                 @if (auth()->user()->deposit_authorized)
                     <div class="dashboard-callout dashboard-callout-success">
                         <strong>Votre autorisation de dépôt est active</strong>
-                        <p>Complétez les informations du mémoire et joignez le PDF intégral (50 Mo maximum).</p>
+                        <p>Complétez les informations du mémoire et joignez le PDF intégral (5 Mo maximum).</p>
                         <a class="button" href="#deposit-form">Ouvrir le formulaire de dépôt</a>
                     </div>
                 @else
@@ -164,9 +180,10 @@
                         <span class="status-pill status-pending">En attente de vérification</span>
                     </div>
                 @endif
-            </article>
+                </article>
+            @endif
 
-            @if (auth()->user()->deposit_authorized)
+            @if ($isL3Student && auth()->user()->deposit_authorized)
                 <article class="dashboard-card deposit-form-card">
                     <div class="dashboard-card-heading">
                         <span class="benefit-icon" aria-hidden="true">
@@ -229,7 +246,7 @@
                             <input id="thesis-supervisor" name="supervisor" type="text" maxlength="255">
                         </div>
                         <div class="field deposit-file-field">
-                            <label for="thesis-file">Fichier PDF intégral (50 Mo maximum) *</label>
+                            <label for="thesis-file">Fichier PDF intégral (5 Mo maximum) *</label>
                             <input class="file-input" id="thesis-file" name="document" type="file" accept=".pdf,application/pdf" required>
                             <p class="form-note" id="file-name">Aucun fichier sélectionné</p>
                         </div>

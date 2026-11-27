@@ -16,9 +16,14 @@ class Thesis extends Model
         'author_name',
         'matricule',
         'department',
+        'filiere_id',
         'defended_year',
+        'defense_year_id',
         'supervisor',
+        'abstract',
+        'keywords',
         'status',
+        'visibility',
         'published_at',
     ];
 
@@ -26,6 +31,7 @@ class Thesis extends Model
     {
         return [
             'defended_year' => 'integer',
+            'keywords' => 'array',
             'published_at' => 'datetime',
         ];
     }
@@ -33,6 +39,16 @@ class Thesis extends Model
     public function student(): BelongsTo
     {
         return $this->belongsTo(User::class, 'student_id');
+    }
+
+    public function filiere(): BelongsTo
+    {
+        return $this->belongsTo(Filiere::class);
+    }
+
+    public function defenseYear(): BelongsTo
+    {
+        return $this->belongsTo(DefenseYear::class);
     }
 
     public function versions(): HasMany
@@ -68,5 +84,15 @@ class Thesis extends Model
     public function archiveImport(): HasOne
     {
         return $this->hasOne(ThesisArchiveImport::class);
+    }
+
+    public function physicalReceipts(): HasMany
+    {
+        return $this->hasMany(ThesisPhysicalReceipt::class);
+    }
+
+    public function publications(): HasMany
+    {
+        return $this->hasMany(ThesisPublication::class);
     }
 }

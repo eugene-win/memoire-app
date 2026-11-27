@@ -1,6 +1,10 @@
 <?php
 
+use App\Models\StudentRegistry;
+use App\Models\StudyLevel;
 use App\Models\User;
+use Database\Seeders\ReferenceDataSeeder;
+use Database\Seeders\StudentRegistrySeeder;
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
@@ -10,6 +14,7 @@ uses(RefreshDatabase::class);
 
 it('creates an external reader account and redirects to the dashboard', function () {
     $response = $this->post(route('register'), [
+        'account_type' => 'external_reader',
         'first_name' => 'Awa',
         'last_name' => 'Dossou',
         'email' => 'awa@example.com',
@@ -28,6 +33,41 @@ it('creates an external reader account and redirects to the dashboard', function
     expect(Hash::check('StrongPassword123!', User::where('email', 'awa@example.com')->value('password')))->toBeTrue();
 });
 
+it('does not expose student registration through the public registration endpoint', function () {
+    $this->seed(ReferenceDataSeeder::class);
+    $this->seed(StudentRegistrySeeder::class);
+    $registryEntry = StudentRegistry::query()
+        ->where('matricule', sprintf('ENEAM-TEST-%d-025', now()->year))
+        ->firstOrFail();
+
+    $this->post(route('register'), [
+        'account_type' => 'student',
+        'matricule' => $registryEntry->matricule,
+        'password' => 'StrongPassword123!',
+        'password_confirmation' => 'StrongPassword123!',
+    ])->assertSessionHasErrors('account_type', null, 'register');
+
+    $this->assertGuest();
+    $this->assertDatabaseMissing('users', ['matricule' => $registryEntry->matricule]);
+});
+
+it('does not allow public registration for responsible or administrator accounts', function () {
+    foreach (['validator', 'library_manager', 'administrator'] as $accountType) {
+        $this->post(route('register'), [
+            'account_type' => $accountType,
+            'first_name' => 'Jean',
+            'last_name' => 'Kossi',
+            'email' => 'jean.responsable@example.com',
+            'matricule' => 'ENEAM-STAFF-501',
+            'password' => 'StrongPassword123!',
+            'password_confirmation' => 'StrongPassword123!',
+            'terms' => 'on',
+        ])->assertSessionHasErrors('account_type', null, 'register');
+    }
+
+    $this->assertDatabaseMissing('users', ['email' => 'jean.responsable@example.com']);
+});
+
 it('authenticates an external reader with email and redirects to the dashboard', function () {
     User::factory()->create([
         'email' => 'reader@example.com',
@@ -35,7 +75,6 @@ it('authenticates an external reader with email and redirects to the dashboard',
     ]);
 
     $response = $this->post(route('login.store'), [
-        'account_type' => 'external_reader',
         'identifier' => 'reader@example.com',
         'password' => 'StrongPassword123!',
     ]);
@@ -44,37 +83,81 @@ it('authenticates an external reader with email and redirects to the dashboard',
     $this->assertAuthenticated();
 });
 
-it('authenticates a pre-registered student by matricule', function () {
+it('rejects login for a suspended account', function () {
+    User::factory()->create([
+        'email' => 'suspended@example.com',
+        'password' => 'StrongPassword123!',
+        'account_status' => 'suspended',
+    ]);
+
+    $this->from(route('login'))
+        ->post(route('login.store'), [
+            'identifier' => 'suspended@example.com',
+            'password' => 'StrongPassword123!',
+        ])
+        ->assertRedirect(route('login'))
+        ->assertSessionHasErrors('identifier', null, 'login');
+
+    $this->assertGuest();
+});
+
+it('rejects password login for student accounts', function () {
     User::factory()->create([
         'role' => 'student',
         'matricule' => 'ENEAM-2025-001',
         'password' => 'StrongPassword123!',
     ]);
 
-    $response = $this->post(route('login.store'), [
-        'account_type' => 'student',
+    $this->from(route('login'))->post(route('login.store'), [
         'identifier' => 'ENEAM-2025-001',
+        'password' => 'StrongPassword123!',
+    ])->assertRedirect(route('login'))
+        ->assertSessionHasErrors('identifier', null, 'login');
+
+    $this->assertGuest();
+});
+
+it('requires email-code login for every matricule present in the student registry', function () {
+    $this->seed([
+        ReferenceDataSeeder::class,
+        StudentRegistrySeeder::class,
+    ]);
+    User::factory()->create([
+        'role' => 'external_reader',
+        'matricule' => 'DEMO-ETU-001',
         'password' => 'StrongPassword123!',
     ]);
 
-    $response->assertRedirect(route('dashboard'));
-    $this->assertAuthenticated();
+    $this->from(route('login'))
+        ->post(route('login.store'), [
+            'identifier' => 'DEMO-ETU-001',
+            'password' => 'StrongPassword123!',
+        ])
+        ->assertRedirect(route('login'))
+        ->assertSessionHasErrors('identifier', null, 'login');
+
+    $this->assertGuest();
 });
 
 it('keeps the dashboard behind authentication', function () {
     $this->get(route('dashboard'))->assertRedirect(route('login'));
 });
 
-it('opens login in external-reader mode by default', function () {
+it('shows one identifier-based login with a student code flow and visitor-only registration', function () {
     $this->get(route('login'))
         ->assertOk()
+        ->assertSee('Adresse e-mail ou matricule')
+        ->assertSee('id="login-identifier" name="identifier" type="text"', false)
+        ->assertSee('data-student-code-action=', false)
+        ->assertDontSee('data-signup-role="student"', false)
         ->assertSee('value="external_reader"', false)
-        ->assertSee('type="email"', false)
-        ->assertSee('Responsable de filière et de bibliothèque')
-        ->assertDontSee('data-role="library_manager"', false);
+        ->assertDontSee('name="matricule"', false)
+        ->assertDontSee('data-signup-role="validator"', false)
+        ->assertDontSee('data-signup-role="library_manager"', false);
 });
 
 it('authenticates a pre-registered validator with a matricule', function () {
+    $this->seed(ReferenceDataSeeder::class);
     User::factory()->create([
         'role' => 'validator',
         'matricule' => 'ENEAM-STAFF-001',
@@ -82,17 +165,20 @@ it('authenticates a pre-registered validator with a matricule', function () {
     ]);
 
     $response = $this->post(route('login.store'), [
-        'account_type' => 'validator',
         'identifier' => 'ENEAM-STAFF-001',
         'password' => 'StrongPassword123!',
     ]);
 
     $response->assertRedirect(route('dashboard'));
     $this->assertAuthenticated();
-    $this->get(route('dashboard'))->assertOk()->assertSee('File des dépôts à traiter');
+    $this->get(route('dashboard'))
+        ->assertOk()
+        ->assertSee('File des dépôts à traiter')
+        ->assertDontSee('Importer une archive');
 });
 
 it('authenticates a library manager with a matricule and gives them the validation queue', function () {
+    $this->seed(ReferenceDataSeeder::class);
     User::factory()->create([
         'role' => 'library_manager',
         'matricule' => 'ENEAM-LIB-001',
@@ -100,7 +186,6 @@ it('authenticates a library manager with a matricule and gives them the validati
     ]);
 
     $this->post(route('login.store'), [
-        'account_type' => 'validator',
         'identifier' => 'ENEAM-LIB-001',
         'password' => 'StrongPassword123!',
     ])->assertRedirect(route('dashboard'));
@@ -113,33 +198,39 @@ it('authenticates a library manager with a matricule and gives them the validati
         ->assertSee('Importer une archive');
 });
 
-it('does not offer an administration login or dashboard', function () {
-    $this->get(route('login'))
-        ->assertOk()
-        ->assertDontSee('data-role="administrator"', false)
-        ->assertDontSee('Administration');
-
+it('authenticates an administrator by email and redirects to administration', function () {
     $administrator = User::factory()->create([
         'role' => 'administrator',
         'email' => 'admin@example.com',
         'password' => 'StrongPassword123!',
     ]);
 
-    $this->actingAs($administrator)->get(route('dashboard'))->assertForbidden();
+    $this->post(route('login.store'), [
+        'identifier' => 'admin@example.com',
+        'password' => 'StrongPassword123!',
+    ])->assertRedirect(route('admin.index'));
+
+    $this->assertAuthenticatedAs($administrator);
+    $this->get(route('dashboard'))->assertForbidden();
 });
 
 it('shows a different dashboard for each account role', function () {
+    $this->seed(ReferenceDataSeeder::class);
+
     $reader = User::factory()->create(['role' => 'external_reader']);
     $this->actingAs($reader)->get(route('dashboard'))->assertOk()->assertSee('Mes mémoires achetés');
 
     $student = User::factory()->create(['role' => 'student', 'matricule' => 'ENEAM-2025-002']);
-    $this->actingAs($student)->get(route('dashboard'))->assertOk()->assertSee('Mes dépôts');
+    $this->actingAs($student)->get(route('dashboard'))
+        ->assertOk()
+        ->assertSee('Mes dépôts')
+        ->assertDontSee('id="deposer"', false);
 
     $validator = User::factory()->create(['role' => 'validator', 'matricule' => 'ENEAM-STAFF-002']);
     $this->actingAs($validator)->get(route('dashboard'))
         ->assertOk()
         ->assertSee('File des dépôts à traiter')
-        ->assertSee('Importer une archive');
+        ->assertDontSee('Importer une archive');
 });
 
 it('only enables student deposit access after institutional authorization', function () {
@@ -148,6 +239,7 @@ it('only enables student deposit access after institutional authorization', func
         'matricule' => 'ENEAM-2025-003',
         'deposit_authorized' => false,
     ]);
+    prepareStudentForDeposit($student, false);
 
     $this->actingAs($student)
         ->get(route('dashboard'))
@@ -156,7 +248,7 @@ it('only enables student deposit access after institutional authorization', func
         ->assertDontSee('id="deposit-form"', false)
         ->assertDontSee('Ouvrir le formulaire de dépôt');
 
-    $student->update(['deposit_authorized' => true]);
+    prepareStudentForDeposit($student);
 
     $this->actingAs($student)
         ->get(route('dashboard'))
@@ -164,7 +256,40 @@ it('only enables student deposit access after institutional authorization', func
         ->assertSee('Votre autorisation de dépôt est active')
         ->assertSee('Ouvrir le formulaire de dépôt')
         ->assertSee('id="deposit-form"', false)
-        ->assertSee('Fichier PDF intégral (50 Mo maximum)');
+        ->assertSee('Fichier PDF intégral (5 Mo maximum)');
+});
+
+it('shows the deposit module only to students with an L3 profile matching their matricule', function () {
+    $student = User::factory()->create([
+        'role' => 'student',
+        'matricule' => 'ENEAM-2025-004',
+    ]);
+    prepareStudentForDeposit($student, false);
+
+    $this->actingAs($student)
+        ->get(route('dashboard'))
+        ->assertOk()
+        ->assertSee('id="deposer"', false)
+        ->assertSee('Autorisation de dépôt non confirmée');
+
+    $student->student()->update(['matricule' => 'ENEAM-OTHER-004']);
+    $this->get(route('dashboard'))
+        ->assertOk()
+        ->assertDontSee('id="deposer"', false);
+
+    $l2 = StudyLevel::query()->firstOrCreate(
+        ['code' => 'L2'],
+        ['name' => 'Licence 2', 'is_active' => true],
+    );
+    $student->student()->update([
+        'matricule' => $student->matricule,
+        'study_level_id' => $l2->id,
+    ]);
+
+    $this->get(route('dashboard'))
+        ->assertOk()
+        ->assertDontSee('id="deposer"', false)
+        ->assertDontSee('id="deposit-form"', false);
 });
 
 it('shows an empty real validation queue when no submissions exist', function () {
@@ -220,6 +345,22 @@ it('keeps password reset responses generic for unknown email addresses', functio
         ->post(route('password.email'), ['email' => 'inconnu@example.com'])
         ->assertRedirect(route('login'))
         ->assertSessionHas('password-reset-status', 'Si cette adresse correspond à un compte, un lien de réinitialisation lui sera envoyé.');
+
+    Notification::assertNothingSent();
+});
+
+it('does not send password reset links to student accounts', function () {
+    Notification::fake();
+    User::factory()->create([
+        'role' => 'student',
+        'email' => 'student@example.com',
+        'matricule' => 'ENEAM-2025-009',
+    ]);
+
+    $this->from(route('login'))
+        ->post(route('password.email'), ['email' => 'student@example.com'])
+        ->assertRedirect(route('login'))
+        ->assertSessionHas('password-reset-status');
 
     Notification::assertNothingSent();
 });

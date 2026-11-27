@@ -233,7 +233,8 @@
                 </div>
             </article>
 
-            <article class="dashboard-card">
+            @if (auth()->user()->hasPermission('archives.import'))
+                <article class="dashboard-card">
                 <div class="dashboard-card-heading">
                     <span class="benefit-icon" aria-hidden="true">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -285,7 +286,7 @@
                         <textarea id="archive-control-result" name="control_result" maxlength="2000" required>{{ old('control_result') }}</textarea>
                     </div>
                     <div class="field deposit-file-field deposit-form-full">
-                        <label for="archive-file">PDF intégral (50 Mo maximum) *</label>
+                        <label for="archive-file">PDF intégral (5 Mo maximum) *</label>
                         <input id="archive-file" name="document" type="file" accept=".pdf,application/pdf" required>
                     </div>
                     <label class="deposit-rights form-note">
@@ -321,7 +322,8 @@
                         </div>
                     @endforelse
                 </div>
-            </article>
+                </article>
+            @endif
 
             <article class="dashboard-card dashboard-notice">
                 <span class="notice-symbol" aria-hidden="true">!</span>

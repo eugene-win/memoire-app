@@ -16,6 +16,11 @@ class ThesisVersion extends Model
         'checksum',
         'metadata_snapshot',
         'rights_confirmed_at',
+        'rights_statement_snapshot',
+        'submitted_by_id',
+        'submitted_at',
+        'mime_type',
+        'version_status',
         'analysis_status',
         'analysis_provider',
         'analysis_reference',
@@ -36,6 +41,7 @@ class ThesisVersion extends Model
             'file_size' => 'integer',
             'metadata_snapshot' => 'array',
             'rights_confirmed_at' => 'datetime',
+            'submitted_at' => 'datetime',
             'similarity_percent' => 'decimal:2',
             'analyzed_at' => 'datetime',
             'physical_received_at' => 'datetime',
@@ -55,5 +61,20 @@ class ThesisVersion extends Model
     public function consultations(): HasMany
     {
         return $this->hasMany(ThesisConsultation::class, 'thesis_version_id');
+    }
+
+    public function similarityReports(): HasMany
+    {
+        return $this->hasMany(SimilarityReport::class, 'thesis_version_id');
+    }
+
+    public function physicalReceipts(): HasMany
+    {
+        return $this->hasMany(ThesisPhysicalReceipt::class, 'thesis_version_id');
+    }
+
+    public function submitter(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'submitted_by_id');
     }
 }

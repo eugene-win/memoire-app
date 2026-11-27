@@ -1,4 +1,5 @@
 import './bootstrap';
+import './admin';
 
 const cards = [...document.querySelectorAll('.thesis-card')];
 const searchInput = document.querySelector('#catalog-search');
@@ -146,37 +147,53 @@ document.querySelector('#full-access')?.addEventListener('click', () => {
     showToast('Connectez-vous pour consulter les mémoires accessibles à votre profil.');
 });
 
-document.querySelectorAll('[data-role]').forEach((button) => {
-    button.addEventListener('click', () => {
-        document.querySelectorAll('[data-role]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
-        const role = button.dataset.role;
-        const usesEmail = role === 'external_reader';
-        document.querySelector('#account-type').value = role;
-        document.querySelector('#login-identifier').labels[0].textContent = usesEmail ? 'Adresse e-mail' : 'Matricule professionnel ou étudiant';
-        document.querySelector('#login-identifier').type = usesEmail ? 'email' : 'text';
-        document.querySelector('#login-identifier').placeholder = usesEmail ? 'nom@exemple.com' : 'Votre matricule';
-        document.querySelector('#login-password').autocomplete = 'current-password';
-    });
-});
-
+const loginForm = document.querySelector('#login-form');
 const loginIdentifier = document.querySelector('#login-identifier');
-const selectLoginRoleFromIdentifier = (identifier) => {
-    const value = identifier.trim();
-    if (!value) return;
+const loginPasswordField = document.querySelector('#login-password-field');
+const loginPassword = document.querySelector('#login-password');
+const loginSubmit = document.querySelector('#login-submit');
+const loginMethodNote = document.querySelector('#login-method-note');
+const staffPasswordToggle = document.querySelector('#staff-password-toggle');
+const passwordResetLink = document.querySelector('#password-reset-link');
+let staffPasswordMode = false;
 
-    const currentRole = document.querySelector('#account-type').value;
-    let role = currentRole;
-    if (value.includes('@')) {
-        role = 'external_reader';
-    } else if (!['validator', 'library_manager'].includes(currentRole)) {
-        role = 'student';
+const updateLoginMethod = () => {
+    if (!loginForm || !loginIdentifier || !loginPasswordField || !loginPassword || !loginSubmit) return;
+
+    const usesEmail = loginIdentifier.value.includes('@');
+    const usesPassword = usesEmail || staffPasswordMode;
+    loginIdentifier.name = usesPassword ? 'identifier' : 'matricule';
+    loginPasswordField.hidden = !usesPassword;
+    loginPassword.required = usesPassword;
+    loginForm.action = usesPassword
+        ? loginForm.dataset.passwordAction
+        : loginForm.dataset.studentCodeAction;
+    loginSubmit.textContent = usesPassword ? 'Se connecter' : 'Recevoir un code';
+    if (loginMethodNote) loginMethodNote.hidden = usesPassword;
+    if (passwordResetLink) passwordResetLink.hidden = !usesPassword;
+    if (staffPasswordToggle) {
+        staffPasswordToggle.hidden = usesEmail;
+        staffPasswordToggle.textContent = staffPasswordMode
+            ? 'Étudiant : recevoir un code par e-mail'
+            : 'Personnel ENEAM : connexion par mot de passe';
     }
-    const roleButton = document.querySelector(`[data-role="${role}"]`);
-    if (document.querySelector('#account-type').value !== role) roleButton.click();
 };
 
-loginIdentifier?.addEventListener('input', (event) => selectLoginRoleFromIdentifier(event.currentTarget.value));
-if (loginIdentifier?.value) selectLoginRoleFromIdentifier(loginIdentifier.value);
+loginIdentifier?.addEventListener('input', () => {
+    staffPasswordMode = false;
+    updateLoginMethod();
+});
+staffPasswordToggle?.addEventListener('click', () => {
+    staffPasswordMode = !staffPasswordMode;
+    updateLoginMethod();
+});
+document.querySelector('[data-return-to-login]')?.addEventListener('click', (event) => {
+    const codeForm = event.currentTarget.closest('form');
+    if (codeForm) codeForm.hidden = true;
+    if (loginForm) loginForm.hidden = false;
+    loginIdentifier?.focus();
+});
+updateLoginMethod();
 
 document.querySelector('#deposit-form')?.addEventListener('submit', (event) => {
     const file = document.querySelector('#thesis-file').files[0];
@@ -185,9 +202,9 @@ document.querySelector('#deposit-form')?.addEventListener('submit', (event) => {
         showToast('Veuillez sélectionner un document PDF valide.');
         return;
     }
-    if (file.size > 50 * 1024 * 1024) {
+    if (file.size > 5 * 1024 * 1024) {
         event.preventDefault();
-        showToast('Le fichier dépasse la limite de 50 Mo.');
+        showToast('Le fichier dépasse la limite de 5 Mo.');
         return;
     }
     showToast('Envoi du mémoire en cours…');

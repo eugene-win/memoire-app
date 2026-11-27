@@ -5,15 +5,26 @@ use App\Models\ThesisArchiveImport;
 use App\Models\ThesisDecision;
 use App\Models\ThesisVersion;
 use App\Models\User;
+use Database\Seeders\ReferenceDataSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use setasign\Fpdi\Fpdi;
 
 uses(RefreshDatabase::class);
 
+beforeEach(function () {
+    $this->seed(ReferenceDataSeeder::class);
+});
+
 function validArchivePdf(string $content = 'archive'): UploadedFile
 {
-    return UploadedFile::fake()->createWithContent('archive.pdf', "%PDF-1.4\n".$content."\n%%EOF");
+    $pdf = new Fpdi;
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 12);
+    $pdf->Write(10, $content);
+
+    return UploadedFile::fake()->createWithContent('archive.pdf', $pdf->Output('S'));
 }
 
 function archiveImportPayload(UploadedFile $file, array $overrides = []): array
@@ -35,8 +46,9 @@ function archiveImportPayload(UploadedFile $file, array $overrides = []): array
 
 it('imports and publishes a checked archive without inventing a student account', function () {
     Storage::fake('local');
-    $responsible = User::factory()->create(['role' => 'validator']);
+    $responsible = User::factory()->create(['role' => 'library_manager']);
     $studentReader = User::factory()->create(['role' => 'student']);
+    prepareStudentForDeposit($studentReader);
 
     $this->actingAs($responsible)
         ->post(route('responsable.archives.store'), archiveImportPayload(validArchivePdf()))
@@ -62,6 +74,13 @@ it('imports and publishes a checked archive without inventing a student account'
         'actor_id' => $responsible->id,
         'type' => 'archive_import_published',
     ]);
+    $this->assertDatabaseHas('thesis_publications', [
+        'thesis_id' => $thesis->id,
+        'thesis_version_id' => $thesis->currentVersion->id,
+        'actor_id' => $responsible->id,
+        'action' => 'published',
+        'visibility' => 'public',
+    ]);
     Storage::disk('local')->assertExists($thesis->currentVersion->file_path);
     $this->get(route('home'))->assertOk()->assertSee($thesis->title);
     $this->actingAs($studentReader)
@@ -78,6 +97,10 @@ it('prevents readers from importing archives and requires physical and rights ch
     $reader = User::factory()->create(['role' => 'external_reader']);
 
     $this->actingAs($reader)
+        ->post(route('responsable.archives.store'), archiveImportPayload(validArchivePdf()))
+        ->assertForbidden();
+    $validator = User::factory()->create(['role' => 'validator']);
+    $this->actingAs($validator)
         ->post(route('responsable.archives.store'), archiveImportPayload(validArchivePdf()))
         ->assertForbidden();
     expect(Thesis::count())->toBe(0);
@@ -97,14 +120,18 @@ it('prevents readers from importing archives and requires physical and rights ch
 it('rejects duplicate archive PDFs by checksum', function () {
     Storage::fake('local');
     $responsible = User::factory()->create(['role' => 'library_manager']);
+    $file = validArchivePdf('same archived file');
+    $fileBytes = file_get_contents($file->getRealPath());
 
     $this->actingAs($responsible)
-        ->post(route('responsable.archives.store'), archiveImportPayload(validArchivePdf('same archived file')))
+        ->post(route('responsable.archives.store'), archiveImportPayload($file))
         ->assertRedirect(route('dashboard'));
 
     $this->actingAs($responsible)
         ->from(route('dashboard'))
-        ->post(route('responsable.archives.store'), archiveImportPayload(validArchivePdf('same archived file')))
+        ->post(route('responsable.archives.store'), archiveImportPayload(
+            UploadedFile::fake()->createWithContent('archive.pdf', $fileBytes)
+        ))
         ->assertSessionHasErrors('document');
 
     expect(Thesis::count())->toBe(1)

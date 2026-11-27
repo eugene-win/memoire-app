@@ -10,7 +10,7 @@ class ThesisAnalysisReportController extends Controller
 {
     public function __invoke(Request $request, ThesisVersion $version)
     {
-        abort_unless(in_array($request->user()->role, ['validator', 'library_manager'], true), 403);
+        abort_unless($request->user()->hasRole(['validator', 'library_manager']), 403);
         abort_unless(is_string($version->analysis_report_path) && $version->analysis_report_path !== '', 404);
         abort_unless(Storage::disk('local')->exists($version->analysis_report_path), 404);
 

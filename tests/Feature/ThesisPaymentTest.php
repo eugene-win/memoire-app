@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\PaymentWebhookReceipt;
 use App\Models\Thesis;
 use App\Models\ThesisPayment;
 use App\Models\User;
@@ -73,6 +74,7 @@ it('confirms a payment server-side and grants the external reader protected acce
             'transactionId' => 'txn-payment-success',
             'partnerId' => $payment->reference,
             'amount' => 1000,
+            'currency' => 'XOF',
             'performedAt' => now()->toISOString(),
         ]),
     ]);
@@ -137,6 +139,7 @@ it('does not grant access when the verified transaction amount or partner refere
             'transactionId' => 'txn-payment-invalid',
             'partnerId' => $payment->reference,
             'amount' => 1000,
+            'currency' => 'XOF',
         ], $providerResult)),
     ]);
 
@@ -149,6 +152,7 @@ it('does not grant access when the verified transaction amount or partner refere
 })->with([
     'amount mismatch' => [['amount' => 1000.5]],
     'partner mismatch' => [['partnerId' => 'another-payment-reference']],
+    'currency mismatch' => [['currency' => 'USD']],
 ]);
 
 it('keeps failed provider transactions from granting access', function () {
@@ -164,6 +168,7 @@ it('keeps failed provider transactions from granting access', function () {
             'transactionId' => 'txn-payment-failed',
             'partnerId' => $payment->reference,
             'amount' => 1000,
+            'currency' => 'XOF',
         ]),
     ]);
 
@@ -192,12 +197,14 @@ it('allows a pending transaction to be verified again before granting access', f
                 'transactionId' => 'txn-payment-pending',
                 'partnerId' => $payment->reference,
                 'amount' => 1000,
+                'currency' => 'XOF',
             ])
             ->push([
                 'status' => 'SUCCESS',
                 'transactionId' => 'txn-payment-pending',
                 'partnerId' => $payment->reference,
                 'amount' => 1000,
+                'currency' => 'XOF',
             ]),
     ]);
 
@@ -239,12 +246,14 @@ it('rejects invalid webhook secrets and processes repeated valid webhooks idempo
             'transactionId' => 'txn-webhook-success',
             'partnerId' => $payment->reference,
             'amount' => 1000,
+            'currency' => 'XOF',
         ]),
     ]);
 
     $this->postJson('/api/webhooks/kkiapay', $webhookPayload, ['x-kkiapay-secret' => 'test-webhook-secret'])
         ->assertOk()
         ->assertJsonPath('status', 'paid');
+    expect(PaymentWebhookReceipt::query()->count())->toBe(1);
     $this->postJson('/api/webhooks/kkiapay', $webhookPayload, ['x-kkiapay-secret' => 'test-webhook-secret'])
         ->assertOk()
         ->assertJsonPath('status', 'paid');

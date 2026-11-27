@@ -2,9 +2,14 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\SimilarityReport;
 use App\Models\Thesis;
 use App\Models\ThesisDecision;
+use App\Models\ThesisPhysicalReceipt;
+use App\Models\ThesisPublication;
 use App\Notifications\ThesisWorkflowNotification;
+use App\Services\ActivityLogger;
+use App\Services\Pdf\PdfDocumentValidator;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -16,8 +21,14 @@ use Throwable;
 
 class ThesisReviewController extends Controller
 {
-    public function updateAnalysis(Request $request, Thesis $thesis): RedirectResponse
-    {
+    private const MAX_SIMILARITY_PERCENT = 20;
+
+    public function updateAnalysis(
+        Request $request,
+        Thesis $thesis,
+        ActivityLogger $activityLogger,
+        PdfDocumentValidator $pdfValidator
+    ): RedirectResponse {
         $this->authorizeReview($request, $thesis);
 
         $validated = $request->validate([
@@ -53,6 +64,7 @@ class ThesisReviewController extends Controller
                     'analysis_report' => 'Le rapport sélectionné ne contient pas une signature PDF valide.',
                 ]);
             }
+            $pdfValidator->validate($reportFile->getRealPath(), 'analysis_report');
 
             $reportPath = $reportFile->store('analysis-reports/'.$thesis->id, 'local');
             if (! is_string($reportPath)) {
@@ -66,13 +78,13 @@ class ThesisReviewController extends Controller
         }
 
         try {
-            $oldReportPath = DB::transaction(function () use ($thesis, $request, $validated, $reportPath, $reportFilename): ?string {
+            DB::transaction(function () use ($thesis, $request, $validated, $reportPath, $reportFilename, $activityLogger): void {
                 $lockedThesis = Thesis::query()->lockForUpdate()->findOrFail($thesis->id);
                 abort_unless(in_array($lockedThesis->status, ['analysis_pending', 'analysis_error'], true), 409);
 
                 $version = $lockedThesis->currentVersion()->lockForUpdate()->firstOrFail();
-                $oldReportPath = $version->analysis_report_path;
                 $version->update([
+                    'version_status' => $validated['analysis_status'] === 'completed' ? 'analyzed' : 'analysis_error',
                     'analysis_status' => $validated['analysis_status'],
                     'analysis_provider' => $validated['analysis_provider'],
                     'analysis_reference' => $validated['analysis_reference'] ?? null,
@@ -83,15 +95,28 @@ class ThesisReviewController extends Controller
                     'analysis_note' => $validated['analysis_status'] === 'error' ? $validated['analysis_note'] : null,
                     'analyzed_at' => now(),
                 ]);
+                SimilarityReport::create([
+                    'thesis_version_id' => $version->id,
+                    'provider' => $validated['analysis_provider'],
+                    'provider_reference' => $validated['analysis_reference'] ?? null,
+                    'status' => $validated['analysis_status'],
+                    'similarity_percent' => $validated['analysis_status'] === 'completed' ? $validated['similarity_percent'] : null,
+                    'analysis_result' => $validated['analysis_status'] === 'error' ? $validated['analysis_note'] : null,
+                    'private_report_path' => $reportPath,
+                    'original_report_filename' => $reportFilename,
+                    'exclusions' => $validated['analysis_status'] === 'completed' ? ($validated['analysis_exclusions'] ?? null) : null,
+                    'analyzed_at' => now(),
+                ]);
 
                 if ($validated['analysis_status'] === 'error') {
                     $lockedThesis->update(['status' => 'analysis_error']);
                     $decisionType = 'analysis_error';
                     $reason = $validated['analysis_note'];
-                } elseif ((float) $validated['similarity_percent'] > 20) {
+                } elseif ((float) $validated['similarity_percent'] > self::MAX_SIMILARITY_PERCENT) {
                     $lockedThesis->update(['status' => 'rejected']);
+                    $version->update(['version_status' => 'rejected']);
                     $decisionType = 'automatic_rejection';
-                    $reason = 'Rejet automatique : taux de similitude supérieur à 20 % ('.$validated['similarity_percent'].' %).';
+                    $reason = 'Rejet automatique : taux de similitude supérieur à '.self::MAX_SIMILARITY_PERCENT.' % ('.$validated['similarity_percent'].' %).';
                 } else {
                     $lockedThesis->update(['status' => 'awaiting_physical_review']);
                     $decisionType = 'analysis_acceptable';
@@ -103,7 +128,12 @@ class ThesisReviewController extends Controller
                     'thesis_version_id' => $version->id,
                     'actor_id' => $request->user()->id,
                     'type' => $decisionType,
+                    'source' => $decisionType === 'automatic_rejection' ? 'automatic' : 'manual',
                     'reason' => $reason,
+                ]);
+                $activityLogger->record($request->user(), 'thesis.analysis_recorded', $version, [
+                    'status' => $validated['analysis_status'],
+                    'similarity_percent' => $validated['analysis_status'] === 'completed' ? $validated['similarity_percent'] : null,
                 ]);
 
                 [$event, $title, $message] = match ($decisionType) {
@@ -131,7 +161,6 @@ class ThesisReviewController extends Controller
                     $version->id,
                 ));
 
-                return $oldReportPath;
             });
         } catch (Throwable $exception) {
             if ($reportPath !== null) {
@@ -141,21 +170,17 @@ class ThesisReviewController extends Controller
             throw $exception;
         }
 
-        if ($reportPath !== null && $oldReportPath !== null && $oldReportPath !== $reportPath) {
-            Storage::disk('local')->delete($oldReportPath);
-        }
-
         return back()->with('status', 'Le résultat d’analyse a été enregistré.');
     }
 
-    public function confirmPhysicalReceipt(Request $request, Thesis $thesis): RedirectResponse
+    public function confirmPhysicalReceipt(Request $request, Thesis $thesis, ActivityLogger $activityLogger): RedirectResponse
     {
         $this->authorizeReview($request, $thesis);
         $request->validate([
             'physical_checked' => ['required', 'accepted'],
         ]);
 
-        DB::transaction(function () use ($thesis, $request): void {
+        DB::transaction(function () use ($thesis, $request, $activityLogger): void {
             $lockedThesis = Thesis::query()->lockForUpdate()->findOrFail($thesis->id);
             abort_unless($lockedThesis->status === 'awaiting_physical_review', 409);
 
@@ -163,6 +188,13 @@ class ThesisReviewController extends Controller
             $version->update([
                 'physical_received_at' => now(),
                 'physical_received_by' => $request->user()->id,
+                'version_status' => 'physical_received',
+            ]);
+            ThesisPhysicalReceipt::create([
+                'thesis_id' => $lockedThesis->id,
+                'thesis_version_id' => $version->id,
+                'responsible_id' => $request->user()->id,
+                'received_at' => now(),
             ]);
             $lockedThesis->update(['status' => 'physical_received']);
 
@@ -171,8 +203,10 @@ class ThesisReviewController extends Controller
                 'thesis_version_id' => $version->id,
                 'actor_id' => $request->user()->id,
                 'type' => 'physical_received',
+                'source' => 'manual',
                 'reason' => 'Réception du document physique confirmée.',
             ]);
+            $activityLogger->record($request->user(), 'thesis.physical_receipt_recorded', $version);
             $lockedThesis->student->notify(new ThesisWorkflowNotification(
                 'physical_review_completed',
                 'Contrôle physique effectué',
@@ -185,7 +219,7 @@ class ThesisReviewController extends Controller
         return back()->with('status', 'La réception physique a été enregistrée.');
     }
 
-    public function decide(Request $request, Thesis $thesis): RedirectResponse
+    public function decide(Request $request, Thesis $thesis, ActivityLogger $activityLogger): RedirectResponse
     {
         $this->authorizeReview($request, $thesis);
 
@@ -195,30 +229,59 @@ class ThesisReviewController extends Controller
             'physical_compatible' => ['required_if:decision,publish', 'accepted_if:decision,publish'],
         ]);
 
-        DB::transaction(function () use ($thesis, $request, $validated): void {
+        DB::transaction(function () use ($thesis, $request, $validated, $activityLogger): void {
             $lockedThesis = Thesis::query()->lockForUpdate()->findOrFail($thesis->id);
             abort_unless($lockedThesis->status === 'physical_received', 409);
 
             $version = $lockedThesis->currentVersion()->lockForUpdate()->firstOrFail();
             abort_unless(
                 $version->analysis_status === 'completed'
-                && (float) $version->similarity_percent <= 20
+                && (float) $version->similarity_percent <= self::MAX_SIMILARITY_PERCENT
                 && $version->physical_received_at !== null,
                 409
             );
 
             $isPublishing = $validated['decision'] === 'publish';
+            $physicalReceipt = $lockedThesis->physicalReceipts()
+                ->where('thesis_version_id', $version->id)
+                ->latest('received_at')
+                ->lockForUpdate()
+                ->firstOrFail();
+            $physicalReceipt->update([
+                'is_compatible' => $isPublishing,
+                'notes' => $isPublishing
+                ? 'Le document physique a été comparé au PDF et déclaré compatible.'
+                : $validated['reason'],
+            ]);
             $lockedThesis->update([
                 'status' => $isPublishing ? 'published' : 'rejected',
                 'published_at' => $isPublishing ? now() : null,
             ]);
+            $version->update(['version_status' => $isPublishing ? 'published' : 'rejected']);
 
             ThesisDecision::create([
                 'thesis_id' => $lockedThesis->id,
                 'thesis_version_id' => $version->id,
                 'actor_id' => $request->user()->id,
                 'type' => $isPublishing ? 'published' : 'rejected',
+                'source' => 'manual',
                 'reason' => $isPublishing ? 'Document physique comparé et déclaré compatible avec le PDF.' : $validated['reason'],
+            ]);
+            ThesisPublication::create([
+                'thesis_id' => $lockedThesis->id,
+                'thesis_version_id' => $version->id,
+                'actor_id' => $request->user()->id,
+                'action' => $isPublishing ? 'published' : 'rejected',
+                'visibility' => $lockedThesis->visibility,
+                'reason' => $isPublishing ? 'Document physique comparé et déclaré compatible avec le PDF.' : $validated['reason'],
+                'similarity_percent' => $version->similarity_percent,
+                'physical_compatible' => $isPublishing,
+                'rights_confirmed' => $version->rights_confirmed_at !== null,
+                'occurred_at' => now(),
+            ]);
+            $activityLogger->record($request->user(), $isPublishing ? 'thesis.published' : 'thesis.rejected', $lockedThesis, [
+                'version_id' => $version->id,
+                'reason' => $isPublishing ? null : $validated['reason'],
             ]);
             $lockedThesis->student->notify(new ThesisWorkflowNotification(
                 $isPublishing ? 'thesis_published' : 'thesis_rejected',
@@ -238,7 +301,11 @@ class ThesisReviewController extends Controller
 
     private function authorizeReview(Request $request, Thesis $thesis): void
     {
-        abort_unless(in_array($request->user()->role, ['validator', 'library_manager'], true), 403);
+        abort_unless(
+            $request->user()->account_status === 'active'
+                && $request->user()->hasRole(['validator', 'library_manager']),
+            403
+        );
         abort_if($thesis->student_id === $request->user()->id, 403);
     }
 }

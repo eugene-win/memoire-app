@@ -5,12 +5,18 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use setasign\Fpdi\Fpdi;
 
 uses(RefreshDatabase::class);
 
 function validAnalysisReportPdf(): UploadedFile
 {
-    return UploadedFile::fake()->createWithContent('rapport anti-plagiat.pdf', "%PDF-1.4\nRapport d’analyse\n%%EOF");
+    $pdf = new Fpdi;
+    $pdf->AddPage();
+    $pdf->SetFont('Arial', '', 12);
+    $pdf->Write(10, 'Analysis report');
+
+    return UploadedFile::fake()->createWithContent('rapport anti-plagiat.pdf', $pdf->Output('S'));
 }
 
 function createThesisAwaitingAnalysisReport(User $student): Thesis

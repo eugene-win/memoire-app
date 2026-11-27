@@ -17,6 +17,15 @@ class DashboardController extends Controller
             'notifications' => $user->notifications()->latest()->limit(8)->get(),
             'unreadNotificationsCount' => $user->unreadNotifications()->count(),
         ];
+        $isL3Student = false;
+        if ($user->role === 'student') {
+            $studentProfile = $user->student()
+                ->with('studyLevel')
+                ->where('matricule', $user->matricule)
+                ->first();
+            $isL3Student = $studentProfile?->studyLevel?->code === 'L3'
+                && $studentProfile->studyLevel->is_active;
+        }
 
         return match ($user->role) {
             'external_reader' => view('dashboard.reader', array_merge($notificationData, [
@@ -37,6 +46,8 @@ class DashboardController extends Controller
                     ->get(),
             ])),
             'student' => view('dashboard.student', array_merge($notificationData, [
+                'isL3Student' => $isL3Student,
+                'studentRegistry' => $user->studentRegistry,
                 'consultations' => $user->consultations()
                     ->with(['thesis', 'version'])
                     ->latest('consulted_at')
@@ -60,6 +71,20 @@ class DashboardController extends Controller
                 'authorizedStudents' => User::query()
                     ->where('role', 'student')
                     ->where('deposit_authorized', true)
+                    ->where('account_status', 'active')
+                    ->whereHas('student', function ($query): void {
+                        $query->where('enrollment_status', 'enrolled')
+                            ->whereNotNull('institutionally_verified_at')
+                            ->whereNotNull('defended_at')
+                            ->whereHas('studyLevel', fn ($query) => $query->where('code', 'L3'))
+                            ->whereHas('filiere', fn ($query) => $query->where('is_active', true));
+                    })
+                    ->whereHas('depositAuthorization', function ($query): void {
+                        $query->where('status', 'active')
+                            ->where(function ($query): void {
+                                $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
+                            });
+                    })
                     ->orderBy('name')
                     ->limit(30)
                     ->get(),

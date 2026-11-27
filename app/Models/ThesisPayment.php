@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ThesisPayment extends Model
@@ -43,5 +44,10 @@ class ThesisPayment extends Model
     public function accessGrant(): HasOne
     {
         return $this->hasOne(ThesisAccessGrant::class);
+    }
+
+    public function webhookReceipts(): HasMany
+    {
+        return $this->hasMany(PaymentWebhookReceipt::class, 'thesis_payment_id');
     }
 }

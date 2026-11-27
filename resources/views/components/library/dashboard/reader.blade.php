@@ -99,6 +99,49 @@
                 @endforelse
             </article>
 
+            <article class="dashboard-card">
+                <div class="dashboard-card-heading">
+                    <span class="benefit-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>
+                        </svg>
+                    </span>
+                    <div>
+                        <h2>Mon profil</h2>
+                        <p>Mettez à jour vos coordonnées et votre mot de passe.</p>
+                    </div>
+                </div>
+                <form class="deposit-form profile-form" method="POST" action="{{ route('profile.update') }}">
+                    @csrf
+                    @method('PATCH')
+                    <div class="field">
+                        <label for="profile-first-name">Prénom</label>
+                        <input id="profile-first-name" name="first_name" value="{{ old('first_name', auth()->user()->first_name ?? explode(' ', auth()->user()->name, 2)[0]) }}" maxlength="255" required>
+                    </div>
+                    <div class="field">
+                        <label for="profile-last-name">Nom</label>
+                        <input id="profile-last-name" name="last_name" value="{{ old('last_name', auth()->user()->last_name ?? (explode(' ', auth()->user()->name, 2)[1] ?? '')) }}" maxlength="255" required>
+                    </div>
+                    <div class="field profile-form-full">
+                        <label for="profile-email">Adresse e-mail</label>
+                        <input id="profile-email" name="email" type="email" value="{{ old('email', auth()->user()->email) }}" maxlength="255" required autocomplete="email">
+                    </div>
+                    <div class="field">
+                        <label for="profile-current-password">Mot de passe actuel (si changement)</label>
+                        <input id="profile-current-password" name="current_password" type="password" autocomplete="current-password">
+                    </div>
+                    <div class="field">
+                        <label for="profile-password">Nouveau mot de passe (facultatif)</label>
+                        <input id="profile-password" name="password" type="password" minlength="12" autocomplete="new-password">
+                    </div>
+                    <div class="field profile-form-full">
+                        <label for="profile-password-confirmation">Confirmer le nouveau mot de passe</label>
+                        <input id="profile-password-confirmation" name="password_confirmation" type="password" autocomplete="new-password">
+                    </div>
+                    <button class="button" type="submit">Enregistrer mon profil</button>
+                </form>
+            </article>
+
             <article class="dashboard-card dashboard-notice">
                 <span class="notice-symbol" aria-hidden="true">i</span>
                 <div>

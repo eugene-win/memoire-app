@@ -1,8 +1,8 @@
 <dialog class="modal" id="signup-dialog" aria-labelledby="signup-title" @if ($errors->register->any()) data-auto-open @endif>
             <div class="modal-head">
                 <div>
-                    <h2 id="signup-title">Créer un compte lecteur</h2>
-                    <p>Inscrivez-vous pour retrouver vos accès et vos consultations.</p>
+                    <h2 id="signup-title">Créer un compte utilisateur</h2>
+                    <p>Les étudiants se connectent avec leur matricule et un code envoyé par e-mail.</p>
                 </div>
                 <button class="modal-close" type="button" aria-label="Fermer">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg>
@@ -11,6 +11,7 @@
             <div class="modal-body">
                 <form class="modal-form" id="signup-form" method="POST" action="{{ route('register') }}">
                     @csrf
+                    <input name="account_type" type="hidden" value="external_reader">
                     <div class="field">
                         <label for="signup-first-name">Prénom</label>
                         <input id="signup-first-name" name="first_name" type="text" value="{{ old('first_name') }}" autocomplete="given-name" required>
@@ -43,7 +44,7 @@
                         </div>
                     @endif
                     <button class="button" type="submit">Créer mon compte</button>
-                    <p class="form-note">Votre compte lecteur sera créé après validation des informations.</p>
+                    <p class="form-note">Les comptes responsables et administrateurs sont créés par l’administration.</p>
                 </form>
             </div>
         </dialog>
